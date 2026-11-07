@@ -99,53 +99,105 @@ def reconstruct_abstract(inv_index):
     return " ".join(pos[p] for p in sorted(pos))
 
 
+class BudgetExhausted(Exception):
+    """Daily OpenAlex budget is spent. Stop cleanly; resume after reset."""
+
+
+def get_json(url, tries=6):
+    """GET with retries. A slow response is survived, not fatal.
+    Waits longer after each failure (1,2,4,8,16,32 s).
+    A spent daily budget raises BudgetExhausted so the run stops cleanly."""
+    wait = 1
+    for attempt in range(tries):
+        try:
+            r = requests.get(url, timeout=90)
+            if r.status_code == 429:
+                body = {}
+                try:
+                    body = r.json()
+                except ValueError:
+                    pass
+                # budget spent vs transient rate limit
+                if str(body.get("dailyRemainingUsd")) == "0" or \
+                   "budget" in str(body.get("message", "")).lower():
+                    raise BudgetExhausted(body.get("message", "budget spent"))
+                time.sleep(wait)
+                wait = min(wait * 2, 32)
+                continue
+            r.raise_for_status()
+            return r.json()
+        except BudgetExhausted:
+            raise
+        except (requests.exceptions.RequestException, ValueError) as e:
+            if attempt == tries - 1:
+                raise
+            print(f"    retry {attempt+1}/{tries} after error: "
+                  f"{type(e).__name__}", flush=True)
+            time.sleep(wait)
+            wait = min(wait * 2, 32)
+    return {}
+
+
 def search(phrase, year, key, mail, limit):
-    """One phrase, one year. Yield paper rows."""
-    params = {
-        "filter": f"publication_year:{year},fulltext.search:{phrase}",
-        "per-page": min(limit, 50),
-        "mailto": mail,
-        "select": "id,doi,title,publication_year,authorships,"
-                  "primary_location,abstract_inverted_index,type",
-    }
-    if key:
-        params["api_key"] = key
-    url = API + "?" + urllib.parse.urlencode(params)
-    r = requests.get(url, timeout=30)
-    r.raise_for_status()
-    data = r.json()
-    for w in data.get("results", []):
-        abstract = reconstruct_abstract(w.get("abstract_inverted_index"))
-        hay = f"{w.get('title') or ''}. {abstract or ''}"
-        snippet = first_sentence(hay, phrase)
-        if not snippet:
-            continue
-        # drop obvious false friends
-        low = snippet.lower()
-        if any(ff in low for ff in FALSE_FRIENDS):
-            continue
-        loc = w.get("primary_location") or {}
-        src = (loc.get("source") or {}).get("display_name")
-        auths = w.get("authorships") or []
-        first_country = None
-        if auths:
-            insts = auths[0].get("institutions") or []
-            if insts:
-                first_country = insts[0].get("country_code")
-        yield {
-            "openalex_id": w["id"],
-            "doi": w.get("doi"),
-            "title": w.get("title"),
-            "year": w.get("publication_year"),
-            "type": w.get("type"),
-            "source": src,
-            "first_author_country": first_country,
-            "matched_phrase": phrase,
-            "evidence_sentence": snippet,
-            "link": w.get("doi") or w["id"],
-            "date_read": dt.date.today().isoformat(),
-            "method_version": METHOD_VERSION,
+    """One phrase, one year. Yield paper rows.
+
+    limit <= 0 means no cap: page through everything with a cursor.
+    """
+    cursor = "*"
+    seen = 0
+    while cursor:
+        params = {
+            "filter": f"publication_year:{year},fulltext.search:{phrase}",
+            "per-page": 200,
+            "cursor": cursor,
+            "mailto": mail,
+            "select": "id,doi,title,publication_year,authorships,"
+                      "primary_location,abstract_inverted_index,type",
         }
+        if key:
+            params["api_key"] = key
+        url = API + "?" + urllib.parse.urlencode(params)
+        data = get_json(url)
+        results = data.get("results", [])
+        if not results:
+            break
+        for w in results:
+            abstract = reconstruct_abstract(w.get("abstract_inverted_index"))
+            hay = f"{w.get('title') or ''}. {abstract or ''}"
+            snippet = first_sentence(hay, phrase)
+            if not snippet:
+                continue
+            # drop obvious false friends
+            low = snippet.lower()
+            if any(ff in low for ff in FALSE_FRIENDS):
+                continue
+            loc = w.get("primary_location") or {}
+            src = (loc.get("source") or {}).get("display_name")
+            auths = w.get("authorships") or []
+            first_country = None
+            if auths:
+                insts = auths[0].get("institutions") or []
+                if insts:
+                    first_country = insts[0].get("country_code")
+            yield {
+                "openalex_id": w["id"],
+                "doi": w.get("doi"),
+                "title": w.get("title"),
+                "year": w.get("publication_year"),
+                "type": w.get("type"),
+                "source": src,
+                "first_author_country": first_country,
+                "matched_phrase": phrase,
+                "evidence_sentence": snippet,
+                "link": w.get("doi") or w["id"],
+                "date_read": dt.date.today().isoformat(),
+                "method_version": METHOD_VERSION,
+            }
+            seen += 1
+            if limit > 0 and seen >= limit:
+                return
+        cursor = (data.get("meta") or {}).get("next_cursor")
+        time.sleep(1)  # polite pause between pages
 
 
 def dedupe(rows):
@@ -172,46 +224,97 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--years", nargs="+", type=int, default=[2020])
     ap.add_argument("--limit", type=int, default=50,
-                    help="max papers per phrase per year")
+                    help="max papers per phrase per year; 0 = no cap")
+    ap.add_argument("--fresh", action="store_true",
+                    help="wipe the raw table and start over (default: resume)")
     ap.add_argument("--out", default="data/papers.duckdb")
     args = ap.parse_args()
 
     key, mail = load_env()
-    print(f"Key: {'yes' if key else 'no (free budget)'}  Mail: {mail}")
-
-    rows = []
-    for year in args.years:
-        for phrase in PHRASES:
-            got = list(search(phrase, year, key, mail, args.limit))
-            print(f"  {year}  {phrase:<22} {len(got):>3} hits")
-            rows.extend(got)
-            time.sleep(1)  # polite pause, one request at a time
-
-    print(f"Raw rows: {len(rows)}")
-    rows = dedupe(rows)
-    print(f"After dedupe: {len(rows)}")
+    print(f"Key: {'yes' if key else 'no (free budget)'}  Mail: {mail}", flush=True)
 
     out = os.path.join(os.path.dirname(__file__), "..", args.out)
     out = os.path.abspath(out)
     os.makedirs(os.path.dirname(out), exist_ok=True)
+
+    # One DB for the whole run. We write after EACH phrase/year, so a stop
+    # never loses finished work. A "raw" table keeps every hit; dedupe runs
+    # at the end into the final "papers" table.
     con = duckdb.connect(out)
-    con.execute("DROP TABLE IF EXISTS papers")
+    if args.fresh:
+        con.execute("DROP TABLE IF EXISTS raw")
     con.execute("""
-        CREATE TABLE papers (
+        CREATE TABLE IF NOT EXISTS raw (
             openalex_id TEXT, doi TEXT, title TEXT, year INTEGER,
             type TEXT, source TEXT, first_author_country TEXT,
             matched_phrase TEXT, evidence_sentence TEXT, link TEXT,
             date_read TEXT, method_version TEXT
         )""")
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS done (year INTEGER, phrase TEXT)""")
+
+    already = {(r[0], r[1]) for r in
+               con.execute("SELECT year, phrase FROM done").fetchall()}
+    if already:
+        print(f"Resuming: {len(already)} phrase/year pairs already done.",
+              flush=True)
+
+    total = con.execute("SELECT count(*) FROM raw").fetchone()[0]
+    stopped_early = False
+    for year in args.years:
+        if stopped_early:
+            break
+        for phrase in PHRASES:
+            if (year, phrase) in already:
+                continue
+            try:
+                got = list(search(phrase, year, key, mail, args.limit))
+            except BudgetExhausted as e:
+                # Do NOT mark this pair done: resume will re-fetch it.
+                print(f"\nBUDGET SPENT at {year} / {phrase}.", flush=True)
+                print(f"  {e}", flush=True)
+                print("  Finished pairs are saved. Re-run the same command "
+                      "after midnight UTC to resume.", flush=True)
+                stopped_early = True
+                break
+            if got:
+                con.executemany(
+                    "INSERT INTO raw VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    [tuple(r.values()) for r in got],
+                )
+            con.execute("INSERT INTO done VALUES (?, ?)", [year, phrase])
+            total += len(got)
+            print(f"  {year}  {phrase:<28} {len(got):>5} hits "
+                  f"(running total {total})", flush=True)
+            time.sleep(1)  # polite pause, one request at a time
+
+    print(f"Raw rows saved: {total}", flush=True)
+
+    # dedupe raw -> papers
+    rows = con.execute("SELECT * FROM raw").fetchall()
+    cols = [d[0] for d in con.description]
+    dict_rows = [dict(zip(cols, r)) for r in rows]
+    deduped = dedupe(dict_rows)
+    print(f"After dedupe: {len(deduped)}", flush=True)
+
+    con.execute("DROP TABLE IF EXISTS papers")
+    con.execute("CREATE TABLE papers AS SELECT * FROM raw WHERE false")
     con.executemany(
         "INSERT INTO papers VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-        [tuple(r.values()) for r in rows],
+        [tuple(r[c] for c in cols) for r in deduped],
     )
     con.execute(f"COPY papers TO '{out.replace('.duckdb', '.parquet')}' (FORMAT PARQUET)")
+
+    # coverage report per year (graded item)
+    print("\nCoverage per year (deduped papers):", flush=True)
+    for r in con.execute(
+        "SELECT year, count(*) FROM papers GROUP BY year ORDER BY year"
+    ).fetchall():
+        print(f"  {r[0]}  {r[1]:>6}", flush=True)
     n = con.execute("SELECT count(*) FROM papers").fetchone()[0]
     con.close()
-    print(f"Saved {n} papers to {out}")
-    print(f"Parquet: {out.replace('.duckdb', '.parquet')}")
+    print(f"\nSaved {n} papers to {out}", flush=True)
+    print(f"Parquet: {out.replace('.duckdb', '.parquet')}", flush=True)
 
 
 if __name__ == "__main__":

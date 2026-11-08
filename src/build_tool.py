@@ -16,7 +16,7 @@ import duckdb
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 DB = os.path.join(ROOT, "data", "papers.duckdb")
-OUT_DIR = os.path.join(ROOT, "site")
+OUT_DIR = os.path.join(ROOT, "docs")   # GitHub Pages serves /docs
 OUT = os.path.join(OUT_DIR, "index.html")
 
 LABEL_NAME = {"U": "Used AWS", "D": "Used open data",
@@ -69,7 +69,7 @@ def main():
     con.close()
     print(f"Built {OUT}")
     print(f"  {len(data)} papers, years {years[0]}-{years[-1]}")
-    print(f"  open it in a browser, or host site/ on GitHub Pages")
+    print(f"  open it in a browser, or host docs/ on GitHub Pages")
 
 
 TEMPLATE = r"""<!doctype html>

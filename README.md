@@ -81,8 +81,8 @@ cp .env.example .env     # then put your OpenAlex key + email in .env
 | Part | State |
 |---|---|
 | Harvest pipeline | done, resumable |
-| Data 2016-2020 | harvested (~2,300 papers) |
-| Data 2021-2026 | scheduled (daily budget limited) |
+| Data 2016-2022 | harvested (3,264 papers, 3,454 mentions) |
+| Data 2023-2026 | pending (resume with the harvest command) |
 | Schema + mentions | done |
 | Rules first-pass | done |
 | Labelling tool | done |

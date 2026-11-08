@@ -1,8 +1,10 @@
 # AWS-in-Science: did the authors actually USE AWS?
 
-A 2016-2026 dataset of scientific papers, labelled by whether the
+A **2016-2022** dataset of scientific papers, labelled by whether the
 authors **used Amazon Web Services** (not just mentioned it), with
 a human-checked gold set and precision/recall.
+
+Scope: this project covers publication years **2016-2022**.
 
 Built for Group 10, Albert School x AWS.
 
@@ -81,8 +83,7 @@ cp .env.example .env     # then put your OpenAlex key + email in .env
 | Part | State |
 |---|---|
 | Harvest pipeline | done, resumable |
-| Data 2016-2022 | harvested (3,264 papers, 3,454 mentions) |
-| Data 2023-2026 | pending (resume with the harvest command) |
+| Data 2016-2022 (project scope) | harvested (3,264 papers, 3,454 mentions) |
 | Schema + mentions | done |
 | Rules first-pass | done |
 | Labelling tool | done |

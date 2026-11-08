@@ -13,7 +13,8 @@ import duckdb
 
 DB = os.path.join(os.path.dirname(__file__), "..", "data", "papers.duckdb")
 DB = os.path.abspath(DB)
-ALL_YEARS = list(range(2016, 2027))
+# Project scope: 2016-2022 only (team decision).
+ALL_YEARS = list(range(2016, 2023))
 N_PHRASES = 15
 
 
